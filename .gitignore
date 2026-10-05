@@ -11,4 +11,6 @@ __pycache__/
 build/
 dist/
 
+data/external/
+
 .DS_Store
