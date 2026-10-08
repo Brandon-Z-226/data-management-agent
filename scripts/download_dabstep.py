@@ -16,6 +16,7 @@ from huggingface_hub import snapshot_download
 REPO_ID = "adyen/DABstep"
 REVISION = "main"
 CONTEXT_PREFIX = "data/context"
+DEV_TASK_PATH = "data/tasks/dev.jsonl"
 CONTEXT_FILES = (
     "payments.csv",
     "payments-readme.md",
@@ -28,6 +29,8 @@ CONTEXT_FILES = (
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DESTINATION = PROJECT_ROOT / "data" / "external" / "dabstep"
+DEFAULT_BENCHMARK_ROOT = PROJECT_ROOT / "data" / "external" / "dabstep_benchmark"
+DEFAULT_DEV_TASKS_DESTINATION = DEFAULT_BENCHMARK_ROOT / "tasks" / "dev.jsonl"
 
 SnapshotDownload = Callable[..., str]
 
@@ -70,9 +73,7 @@ def download_context(
                         repo_id=REPO_ID,
                         repo_type="dataset",
                         revision=REVISION,
-                        allow_patterns=[
-                            f"{CONTEXT_PREFIX}/{name}" for name in files_to_download
-                        ],
+                        allow_patterns=[f"{CONTEXT_PREFIX}/{name}" for name in files_to_download],
                         local_dir=staging_dir,
                         force_download=force,
                     )
@@ -96,9 +97,7 @@ def download_context(
         except DownloadError:
             raise
         except Exception as exc:
-            raise DownloadError(
-                f"failed to download {REPO_ID}/{CONTEXT_PREFIX}: {exc}"
-            ) from exc
+            raise DownloadError(f"failed to download {REPO_ID}/{CONTEXT_PREFIX}: {exc}") from exc
 
     downloaded_names = set(files_to_download)
     results: list[DownloadedFile] = []
@@ -116,6 +115,55 @@ def download_context(
     return tuple(results)
 
 
+def download_dev_tasks(
+    destination: Path = DEFAULT_DEV_TASKS_DESTINATION,
+    *,
+    force: bool = False,
+    snapshot_download_fn: SnapshotDownload = snapshot_download,
+) -> DownloadedFile:
+    """Download only the small official dev task manifest."""
+
+    destination = destination.resolve()
+    if destination.exists() and not destination.is_file():
+        raise DownloadError(f"expected a file but found a non-file path: {destination}")
+    if destination.is_file() and not force:
+        return DownloadedFile(
+            name="tasks/dev.jsonl",
+            size_bytes=destination.stat().st_size,
+            status="skipped",
+        )
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with TemporaryDirectory(prefix=".dabstep-tasks-", dir=destination.parent) as staging_dir:
+            snapshot_root = Path(
+                snapshot_download_fn(
+                    repo_id=REPO_ID,
+                    repo_type="dataset",
+                    revision=REVISION,
+                    allow_patterns=[DEV_TASK_PATH],
+                    local_dir=staging_dir,
+                    force_download=force,
+                )
+            )
+            source = snapshot_root / DEV_TASK_PATH
+            if not source.is_file():
+                raise DownloadError(
+                    f"Hugging Face snapshot did not contain required file: {DEV_TASK_PATH}"
+                )
+            os.replace(source, destination)
+    except DownloadError:
+        raise
+    except Exception as exc:
+        raise DownloadError(f"failed to download {REPO_ID}/{DEV_TASK_PATH}: {exc}") from exc
+
+    return DownloadedFile(
+        name="tasks/dev.jsonl",
+        size_bytes=destination.stat().st_size,
+        status="downloaded",
+    )
+
+
 def format_size(size_bytes: int) -> str:
     """Return a compact binary file size for command-line output."""
 
@@ -129,12 +177,17 @@ def format_size(size_bytes: int) -> str:
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Download only the shared data/context files from adyen/DABstep."
+        description="Download the shared DABstep context and optional dev task manifest."
     )
     parser.add_argument(
         "--force",
         action="store_true",
         help="download and replace files even when they already exist",
+    )
+    parser.add_argument(
+        "--include-dev-tasks",
+        action="store_true",
+        help="also download only data/tasks/dev.jsonl for local benchmark runs",
     )
     return parser.parse_args(argv)
 
@@ -143,6 +196,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
     try:
         files = download_context(force=args.force)
+        dev_tasks = download_dev_tasks(force=args.force) if args.include_dev_tasks else None
     except DownloadError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
@@ -150,6 +204,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"DABstep workspace files: {DEFAULT_DESTINATION}")
     for file in files:
         print(f"- {file.name}: {format_size(file.size_bytes)} ({file.status})")
+    if dev_tasks:
+        print(f"- {dev_tasks.name}: {format_size(dev_tasks.size_bytes)} ({dev_tasks.status})")
     return 0
 
 

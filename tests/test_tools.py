@@ -79,4 +79,6 @@ def test_content_locations_and_tag_updates_validate_ranges_and_overlap() -> None
     with pytest.raises(ValidationError):
         ContentLocation(row_start=10, row_end=2)
     with pytest.raises(ValidationError):
-        UpdateTagsOperation(operation="update_tags", target={"path": "a.csv"}, add={"final"}, remove={"final"})
+        UpdateTagsOperation(
+            operation="update_tags", target={"path": "a.csv"}, add={"final"}, remove={"final"}
+        )

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import time
+from collections import Counter
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -14,11 +15,13 @@ from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
 
 from data_management_agent.agent import ToolTrace, WorkspaceAgent
+from data_management_agent.benchmark import BenchmarkTaskResult, load_results
 from data_management_agent.tools.implementations import create_read_only_tools
 from data_management_agent.workspace import LocalWorkspace
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_WORKSPACE = PROJECT_ROOT / "data" / "external" / "dabstep"
+DEFAULT_RESULTS_DIR = PROJECT_ROOT / "data" / "external" / "dabstep_benchmark" / "results"
 DEFAULT_BASE_URL = "https://api.deepseek.com"
 DEFAULT_MODEL = "deepseek-flash"
 
@@ -94,17 +97,13 @@ def _stored_trace(trace: ToolTrace) -> dict[str, Any]:
     return asdict(trace)
 
 
-def main() -> None:
-    load_dotenv(PROJECT_ROOT / ".env")
-    st.set_page_config(page_title="Data Management Agent Debug UI", layout="centered")
-    st.title("Data Management Agent")
-    st.caption("Local development UI for the existing WorkspaceAgent API")
-
+def _render_chat_page() -> None:
     api_key = os.getenv("OPENAI_API_KEY", "")
     model_name = os.getenv("OPENAI_MODEL") or DEFAULT_MODEL
     base_url = os.getenv("OPENAI_BASE_URL") or DEFAULT_BASE_URL
     workspace_path = _workspace_path()
 
+    st.header("Chat")
     with st.sidebar:
         st.subheader("Runtime")
         st.text(f"Model: {model_name}")
@@ -160,6 +159,106 @@ def main() -> None:
             )
         except Exception as exc:
             st.error(f"Agent run failed: {exc}")
+
+
+def _render_benchmark_page(results_dir: Path | None = None) -> None:
+    st.header("Benchmark Results")
+    configured_results = os.getenv("DABSTEP_BENCHMARK_RESULTS_PATH")
+    results_dir = results_dir or (
+        Path(configured_results) if configured_results else DEFAULT_RESULTS_DIR
+    )
+    if not results_dir.is_absolute():
+        results_dir = PROJECT_ROOT / results_dir
+    result_files = sorted(results_dir.glob("*.jsonl"), reverse=True)
+    if not result_files:
+        st.info(
+            "No benchmark result files found. Run `uv run python scripts/run_benchmark.py "
+            "--limit 3` first."
+        )
+        return
+
+    selected_file = st.selectbox("Result file", result_files, format_func=lambda path: path.name)
+    try:
+        results = load_results(selected_file)
+    except ValueError as exc:
+        st.error(str(exc))
+        return
+    if not results:
+        st.warning("The selected result file is empty.")
+        return
+
+    scored = [result for result in results if result.correctness.score is not None]
+    correct = sum(result.correctness.is_correct is True for result in scored)
+    failed = sum(result.status == "failed" for result in results)
+    accuracy = correct / len(scored) if scored else None
+    overall_correct = correct / len(results)
+    completion = sum(result.status == "succeeded" for result in results) / len(results)
+    metric_columns = st.columns(6)
+    metric_columns[0].metric("Tasks", len(results))
+    metric_columns[1].metric("Completed", f"{completion:.1%}")
+    metric_columns[2].metric("Scored", len(scored))
+    metric_columns[3].metric("Correct", correct)
+    metric_columns[4].metric("Answered accuracy", "n/a" if accuracy is None else f"{accuracy:.1%}")
+    metric_columns[5].metric("Overall correct", f"{overall_correct:.1%}")
+    if failed:
+        st.warning(f"{failed} task run(s) failed before producing a final answer.")
+
+    failure_counts = Counter(
+        failure_type for result in results for failure_type in result.failure_types
+    )
+    st.markdown("**Failure types**")
+    st.json(dict(sorted(failure_counts.items())))
+    st.dataframe([_result_row(result) for result in results], width="stretch")
+
+    selected_task_id = st.selectbox("Task details", [result.task_id for result in results])
+    selected_result = next(result for result in results if result.task_id == selected_task_id)
+    _render_benchmark_task(selected_result)
+
+
+def _result_row(result: BenchmarkTaskResult) -> dict[str, Any]:
+    return {
+        "task_id": result.task_id,
+        "level": result.level,
+        "status": result.status,
+        "error_type": result.error_type,
+        "correct": result.correctness.is_correct,
+        "final_answer": result.final_answer,
+        "reference_answer": result.reference_answer,
+        "latency_s": round(result.latency_ms / 1_000, 3),
+        "tool_calls": len(result.tool_calls),
+        "tool_errors": len(result.tool_errors),
+        "failure_types": ", ".join(result.failure_types),
+    }
+
+
+def _render_benchmark_task(result: BenchmarkTaskResult) -> None:
+    st.markdown(f"**Question:** {result.question}")
+    st.markdown(f"**Reference answer:** `{result.reference_answer}`")
+    st.markdown(f"**Final answer:** `{result.final_answer or ''}`")
+    st.caption(
+        f"run={result.run_id} · conversation={result.conversation_id} · "
+        f"thread={result.thread_id} · task={result.task_id}"
+    )
+    if result.error:
+        st.error(f"{result.error_type or 'Error'}: {result.error}")
+    st.markdown("**Tool calls**")
+    _render_trajectory([call.model_dump(mode="json") for call in result.tool_calls])
+    with st.expander("Complete message trajectory"):
+        st.json(list(result.trajectory))
+    st.markdown("**Total token usage**")
+    st.json(result.token_usage)
+
+
+def main() -> None:
+    load_dotenv(PROJECT_ROOT / ".env")
+    st.set_page_config(page_title="Data Management Agent Debug UI", layout="centered")
+    st.title("Data Management Agent")
+    st.caption("Local development UI for the existing WorkspaceAgent API")
+    page = st.sidebar.radio("Page", ("Chat", "Benchmark Results"))
+    if page == "Benchmark Results":
+        _render_benchmark_page()
+    else:
+        _render_chat_page()
 
 
 if __name__ == "__main__":

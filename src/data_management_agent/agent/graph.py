@@ -47,6 +47,22 @@ class AgentRunResult:
     trajectory: tuple[ToolTrace, ...]
 
 
+class AgentRunError(RuntimeError):
+    """Agent failure carrying the observable state produced before the error."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        messages: tuple[AnyMessage, ...],
+        error_type: str = "AgentRunError",
+    ) -> None:
+        super().__init__(message)
+        self.messages = messages
+        self.trajectory = _extract_trajectory(messages)
+        self.error_type = error_type
+
+
 class WorkspaceAgent:
     """A model-driven agent → tools → agent loop compiled with LangGraph."""
 
@@ -74,13 +90,39 @@ class WorkspaceAgent:
 
     async def arun(self, task: str, *, guidelines: str | None = None) -> AgentRunResult:
         user_content = task if guidelines is None else f"{task}\n\nAnswer guidelines: {guidelines}"
-        state = await self._graph.ainvoke(
-            {"messages": [HumanMessage(content=user_content)]},
-            config={"recursion_limit": self._max_tool_rounds * 2 + 2},
-        )
+        initial_message = HumanMessage(content=user_content)
+        state: dict[str, Any] | None = None
+        try:
+            async for snapshot in self._graph.astream(
+                {"messages": [initial_message]},
+                config={"recursion_limit": self._max_tool_rounds * 2 + 2},
+                stream_mode="values",
+            ):
+                state = cast(dict[str, Any], snapshot)
+        except Exception as exc:
+            partial_messages = (
+                tuple(cast(list[AnyMessage], state["messages"]))
+                if state is not None
+                else (initial_message,)
+            )
+            raise AgentRunError(
+                str(exc),
+                messages=partial_messages,
+                error_type=type(exc).__name__,
+            ) from exc
+        if state is None:
+            raise AgentRunError("agent graph produced no state", messages=(initial_message,))
         messages = tuple(cast(list[AnyMessage], state["messages"]))
+        try:
+            answer = _final_answer(messages)
+        except RuntimeError as exc:
+            raise AgentRunError(
+                str(exc),
+                messages=messages,
+                error_type="GraphRecursionError",
+            ) from exc
         return AgentRunResult(
-            answer=_final_answer(messages),
+            answer=answer,
             messages=messages,
             trajectory=_extract_trajectory(messages),
         )

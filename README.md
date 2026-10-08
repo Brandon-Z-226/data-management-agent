@@ -58,5 +58,31 @@ uv run --group dev streamlit run scripts/streamlit_app.py
 token usage。该 UI 只调用 `WorkspaceAgent.run()`，不包含独立的 tool routing 或 workspace
 访问逻辑。
 
+## DABstep benchmark v0
+
+下载共享 workspace 和官方 dev task manifest（不会下载 submissions 或 leaderboard 数据）：
+
+```bash
+uv run python scripts/download_dabstep.py --include-dev-tasks
+```
+
+顺序运行前 3 个 dev tasks：
+
+```bash
+uv run python scripts/run_benchmark.py --limit 3
+```
+
+或者运行指定 task IDs：
+
+```bash
+uv run python scripts/run_benchmark.py --task-ids 5 49 1305
+```
+
+每次运行写入 `data/external/dabstep_benchmark/results/*.jsonl`，与 Agent 可见的 workspace 隔离。
+每条记录包含 task、conversation、thread 和 turn 标识，以及 question、reference/final answer、
+完整 message trajectory、tool calls、tool errors、延迟、token usage 和
+`normalized_exact_match_v0` correctness。Streamlit 侧边栏的 `Benchmark Results` 页面可以查看
+汇总和单任务详情。
+
 `.env` 和 `data/external/` 均不会提交到 Git。没有 API key 时仍可运行 Workspace、Tool 和
 离线 smoke tests，但无法调用真实 chat model。

@@ -3,10 +3,11 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import pytest
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 from langchain_core.messages import AIMessage
 
-from data_management_agent.agent import WorkspaceAgent
+from data_management_agent.agent import AgentRunError, WorkspaceAgent
 from data_management_agent.tools.implementations import create_read_only_tools
 from data_management_agent.workspace import LocalWorkspace
 
@@ -97,3 +98,33 @@ def test_trajectory_records_tool_error(tmp_path: Path) -> None:
     assert trace.error == "unknown tool: missing_tool"
     assert trace.latency_ms is not None
     assert trace.latency_ms >= 0
+
+
+def test_agent_error_preserves_partial_trajectory(tmp_path: Path) -> None:
+    model = ToolCallingFakeModel(
+        responses=[
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "list_workspace",
+                        "args": {"path": "."},
+                        "id": "call-list",
+                        "type": "tool_call",
+                    }
+                ],
+            )
+        ]
+    )
+    agent = WorkspaceAgent(
+        model=model,
+        tools=create_read_only_tools(),
+        workspace=LocalWorkspace(tmp_path),
+        max_tool_rounds=1,
+    )
+
+    with pytest.raises(AgentRunError) as caught:
+        agent.run("Keep listing forever")
+
+    assert caught.value.error_type == "GraphRecursionError"
+    assert [trace.name for trace in caught.value.trajectory] == ["list_workspace"]
