@@ -1,0 +1,16 @@
+[
+  {
+    "task_id": "5",
+    "question": "Which issuing country has the highest number of transactions?",
+    "guidelines": "Answer must be just the country code. If a question does not have a relevant or applicable answer for the task, please respond with 'Not Applicable'",
+    "level": "easy",
+    "answer": "NL"
+  },
+  {
+    "task_id": "1305",
+    "question": "For account type H and the MCC description: Eating Places and Restaurants, what would be the average fee that the card scheme GlobalCard would charge for a transaction value of 10 EUR? Provide the answer in EUR and 6 decimals",
+    "guidelines": "Answer must be just a number expressed in EUR rounded to 6 decimals. If a question does not have a relevant or applicable answer for the task, please respond with 'Not Applicable'",
+    "level": "hard",
+    "answer": "0.123217"
+  }
+]

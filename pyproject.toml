@@ -5,7 +5,9 @@ description = "An agent for file, knowledge, and data workspaces."
 readme = "README.md"
 requires-python = ">=3.11,<3.12"
 dependencies = [
+    "duckdb",
     "huggingface-hub",
+    "langchain-openai",
     "langgraph",
     "pydantic",
     "python-dotenv",

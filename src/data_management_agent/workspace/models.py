@@ -90,6 +90,7 @@ class WorkspaceQuery(BaseModel):
     path: WorkspacePath = Field(default_factory=lambda: WorkspacePath(root="."))
     recursive: bool = False
     kinds: frozenset[ResourceKind] = Field(default_factory=frozenset)
+    extensions: frozenset[str] = Field(default_factory=frozenset)
     media_types: frozenset[str] = Field(default_factory=frozenset)
     modified_after: datetime | None = None
     modified_before: datetime | None = None

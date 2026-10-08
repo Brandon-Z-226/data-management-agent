@@ -8,6 +8,7 @@ from .base import (
     Workspace,
     WorkspaceError,
 )
+from .local import LocalWorkspace
 from .models import (
     ResourceKind,
     WorkspaceEntry,
@@ -19,6 +20,7 @@ from .models import (
 
 __all__ = [
     "MutableWorkspace",
+    "LocalWorkspace",
     "ResourceConflictError",
     "ResourceKind",
     "ResourceNotFoundError",

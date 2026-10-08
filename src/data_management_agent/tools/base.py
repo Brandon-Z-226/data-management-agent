@@ -15,6 +15,10 @@ InputT = TypeVar("InputT", bound=BaseModel)
 OutputT = TypeVar("OutputT", bound=BaseModel)
 
 
+class ToolExecutionError(RuntimeError):
+    """A tool call failed after its arguments were successfully validated."""
+
+
 class ToolDefinition(BaseModel):
     """Serializable definition suitable for an LLM tool adapter."""
 
