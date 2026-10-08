@@ -72,7 +72,12 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     print("Trajectory:")
     for index, step in enumerate(result.trajectory, start=1):
-        print(f"{index}. {step.name}({step.arguments}) -> {step.status}")
+        latency = "n/a" if step.latency_ms is None else f"{step.latency_ms:.3f} ms"
+        print(f"{index}. {step.name}({step.arguments}) -> {step.status} [{latency}]")
+        if step.error:
+            print(f"   error: {step.error}")
+        if step.token_usage:
+            print(f"   token usage: {step.token_usage}")
         print(f"   {step.result[:2_000]}")
     print(f"Final answer: {result.answer}")
     return 0

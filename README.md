@@ -48,5 +48,15 @@ uv run python scripts/run_agent.py \
   --guidelines "Answer must be just the country code."
 ```
 
+本地开发调试也可以使用 Streamlit 聊天界面：
+
+```bash
+uv run --group dev streamlit run scripts/streamlit_app.py
+```
+
+每轮回答下面会显示可展开的 tool trajectory，包括参数、结果、错误、延迟和模型调用的
+token usage。该 UI 只调用 `WorkspaceAgent.run()`，不包含独立的 tool routing 或 workspace
+访问逻辑。
+
 `.env` 和 `data/external/` 均不会提交到 Git。没有 API key 时仍可运行 Workspace、Tool 和
 离线 smoke tests，但无法调用真实 chat model。

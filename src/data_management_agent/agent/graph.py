@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from typing import Any, Literal, cast
@@ -34,6 +35,9 @@ class ToolTrace:
     arguments: dict[str, Any]
     status: Literal["success", "error"]
     result: str
+    error: str | None = None
+    latency_ms: float | None = None
+    token_usage: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,12 +102,20 @@ class WorkspaceAgent:
 
             results: list[ToolMessage] = []
             for call in message.tool_calls:
+                started_at = time.perf_counter()
                 call_id = call.get("id") or f"call-{len(results)}"
                 name = call["name"]
                 arguments = call.get("args", {})
                 tool = self._tool_map.get(name)
                 if tool is None:
-                    results.append(_error_message(call_id, name, f"unknown tool: {name}"))
+                    results.append(
+                        _error_message(
+                            call_id,
+                            name,
+                            f"unknown tool: {name}",
+                            latency_ms=_elapsed_ms(started_at),
+                        )
+                    )
                     continue
                 try:
                     output = await tool.invoke(
@@ -119,10 +131,18 @@ class WorkspaceAgent:
                             tool_call_id=call_id,
                             name=name,
                             status="success",
+                            artifact={"latency_ms": _elapsed_ms(started_at)},
                         )
                     )
                 except Exception as exc:
-                    results.append(_error_message(call_id, name, str(exc)))
+                    results.append(
+                        _error_message(
+                            call_id,
+                            name,
+                            str(exc),
+                            latency_ms=_elapsed_ms(started_at),
+                        )
+                    )
             return {"messages": results}
 
         def route_after_agent(state: MessagesState) -> str:
@@ -150,13 +170,24 @@ def _model_tool_definition(tool: Tool) -> dict[str, Any]:
     }
 
 
-def _error_message(call_id: str, name: str, message: str) -> ToolMessage:
+def _error_message(
+    call_id: str,
+    name: str,
+    message: str,
+    *,
+    latency_ms: float | None = None,
+) -> ToolMessage:
     return ToolMessage(
         content=json.dumps({"error": message}),
         tool_call_id=call_id,
         name=name,
         status="error",
+        artifact={"error": message, "latency_ms": latency_ms},
     )
+
+
+def _elapsed_ms(started_at: float) -> float:
+    return round((time.perf_counter() - started_at) * 1_000, 3)
 
 
 def _final_answer(messages: tuple[AnyMessage, ...]) -> str:
@@ -169,19 +200,21 @@ def _final_answer(messages: tuple[AnyMessage, ...]) -> str:
 
 
 def _extract_trajectory(messages: tuple[AnyMessage, ...]) -> tuple[ToolTrace, ...]:
-    calls: dict[str, tuple[str, dict[str, Any]]] = {}
+    calls: dict[str, tuple[str, dict[str, Any], dict[str, Any] | None]] = {}
     traces: list[ToolTrace] = []
     for message in messages:
         if isinstance(message, AIMessage):
+            token_usage = _token_usage(message)
             for call in message.tool_calls:
                 call_id = call.get("id") or ""
-                calls[call_id] = (call["name"], call.get("args", {}))
+                calls[call_id] = (call["name"], call.get("args", {}), token_usage)
         elif isinstance(message, ToolMessage):
-            name, arguments = calls.get(
+            name, arguments, token_usage = calls.get(
                 message.tool_call_id,
-                (message.name or "unknown", {}),
+                (message.name or "unknown", {}, None),
             )
             content = message.content if isinstance(message.content, str) else message.text
+            artifact = message.artifact if isinstance(message.artifact, dict) else {}
             traces.append(
                 ToolTrace(
                     call_id=message.tool_call_id,
@@ -189,6 +222,40 @@ def _extract_trajectory(messages: tuple[AnyMessage, ...]) -> tuple[ToolTrace, ..
                     arguments=arguments,
                     status=message.status,
                     result=content,
+                    error=_trace_error(message, content, artifact),
+                    latency_ms=_trace_latency(artifact),
+                    token_usage=token_usage,
                 )
             )
     return tuple(traces)
+
+
+def _token_usage(message: AIMessage) -> dict[str, Any] | None:
+    if message.usage_metadata:
+        return dict(message.usage_metadata)
+    for key in ("token_usage", "usage"):
+        usage = message.response_metadata.get(key)
+        if isinstance(usage, dict):
+            return dict(usage)
+    return None
+
+
+def _trace_error(message: ToolMessage, content: str, artifact: dict[str, Any]) -> str | None:
+    error = artifact.get("error")
+    if isinstance(error, str):
+        return error
+    if message.status != "error":
+        return None
+    try:
+        parsed = json.loads(content)
+    except json.JSONDecodeError:
+        return content
+    parsed_error = parsed.get("error") if isinstance(parsed, dict) else None
+    return parsed_error if isinstance(parsed_error, str) else content
+
+
+def _trace_latency(artifact: dict[str, Any]) -> float | None:
+    latency = artifact.get("latency_ms")
+    if isinstance(latency, int | float):
+        return float(latency)
+    return None
