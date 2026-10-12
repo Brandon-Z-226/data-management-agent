@@ -86,3 +86,9 @@ uv run python scripts/run_benchmark.py --task-ids 5 49 1305
 
 `.env` 和 `data/external/` 均不会提交到 Git。没有 API key 时仍可运行 Workspace、Tool 和
 离线 smoke tests，但无法调用真实 chat model。
+
+## 日志与开发日记
+
+以上三个入口均自动记录本地 `logs/`：运行事件、问题/答案、模型和工具调用、错误、耗时、
+token usage，以及源码/prompt/tool schema 版本快照。无需额外配置；`logs/` 不提交 Git。
+详见 [日志说明](docs/logging.md) 与 [开发日记](docs/journal/README.md)。

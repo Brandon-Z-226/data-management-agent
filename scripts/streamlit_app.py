@@ -9,6 +9,7 @@ from collections import Counter
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import streamlit as st
 from dotenv import load_dotenv
@@ -16,6 +17,7 @@ from langchain_openai import ChatOpenAI
 
 from data_management_agent.agent import ToolTrace, WorkspaceAgent
 from data_management_agent.benchmark import BenchmarkTaskResult, load_results
+from data_management_agent.observability import RunContext, RunJournal, run_scope
 from data_management_agent.tools.implementations import create_read_only_tools
 from data_management_agent.workspace import LocalWorkspace
 
@@ -51,6 +53,7 @@ def _create_agent(
         model=model,
         tools=create_read_only_tools(),
         workspace=LocalWorkspace(workspace_path),
+        journal=RunJournal(PROJECT_ROOT),
     )
 
 
@@ -111,6 +114,7 @@ def _render_chat_page() -> None:
         guidelines = st.text_area("Answer guidelines", placeholder="Optional")
         if st.button("Clear conversation"):
             st.session_state.messages = []
+            st.session_state.pop("log_conversation", None)
             st.rerun()
 
     if not api_key:
@@ -122,6 +126,12 @@ def _render_chat_page() -> None:
 
     if "messages" not in st.session_state:
         st.session_state.messages = []
+    if "log_conversation" not in st.session_state:
+        st.session_state.log_conversation = {
+            "conversation_id": str(uuid4()),
+            "thread_id": str(uuid4()),
+            "turn_index": 0,
+        }
 
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
@@ -139,11 +149,15 @@ def _render_chat_page() -> None:
         st.markdown(prompt)
 
     agent = _create_agent(str(workspace_path), model_name, base_url, api_key)
+    context = RunContext(source="streamlit", **st.session_state.log_conversation)
+    st.session_state.log_conversation["turn_index"] += 1
+    st.caption(f"Event log: logs/runs/{context.execution_id}.jsonl")
     with st.chat_message("assistant"):
         try:
             started_at = time.perf_counter()
             with st.spinner("Running agent..."):
-                result = agent.run(prompt, guidelines=guidelines or None)
+                with run_scope(context):
+                    result = agent.run(prompt, guidelines=guidelines or None)
             latency_ms = (time.perf_counter() - started_at) * 1_000
             trajectory = [_stored_trace(trace) for trace in result.trajectory]
             st.markdown(result.answer)

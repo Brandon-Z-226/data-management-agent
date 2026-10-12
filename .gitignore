@@ -12,5 +12,6 @@ build/
 dist/
 
 data/external/
+logs/
 
 .DS_Store

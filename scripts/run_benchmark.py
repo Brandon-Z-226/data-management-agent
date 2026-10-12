@@ -20,6 +20,7 @@ from data_management_agent.benchmark import (
     run_benchmark,
     select_tasks,
 )
+from data_management_agent.observability import RunJournal
 from data_management_agent.tools.implementations import create_read_only_tools
 from data_management_agent.workspace import LocalWorkspace
 
@@ -88,6 +89,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             ),
             tools=create_read_only_tools(),
             workspace=LocalWorkspace(workspace_path),
+            journal=RunJournal(PROJECT_ROOT),
         )
         summary = run_benchmark(
             agent=agent,

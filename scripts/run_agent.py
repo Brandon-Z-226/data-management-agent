@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
 
 from data_management_agent.agent import WorkspaceAgent
+from data_management_agent.observability import RunContext, RunJournal, run_scope
 from data_management_agent.tools.implementations import create_read_only_tools
 from data_management_agent.workspace import LocalWorkspace
 
@@ -67,8 +68,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         model=model,
         tools=create_read_only_tools(),
         workspace=workspace,
+        journal=RunJournal(PROJECT_ROOT),
     )
-    result = agent.run(args.task, guidelines=args.guidelines)
+    context = RunContext(source="cli")
+    print(f"Event log: {PROJECT_ROOT / 'logs' / 'runs' / (context.execution_id + '.jsonl')}")
+    with run_scope(context):
+        result = agent.run(args.task, guidelines=args.guidelines)
 
     print("Trajectory:")
     for index, step in enumerate(result.trajectory, start=1):

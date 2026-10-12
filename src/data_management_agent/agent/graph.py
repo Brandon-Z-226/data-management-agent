@@ -13,6 +13,7 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, SystemMessage, ToolMessage
 from langgraph.graph import END, START, MessagesState, StateGraph
 
+from data_management_agent.observability import RunJournal, emit
 from data_management_agent.tools import Tool, ToolContext
 from data_management_agent.workspace import Workspace
 
@@ -74,6 +75,7 @@ class WorkspaceAgent:
         workspace: Workspace,
         system_prompt: str = DEFAULT_SYSTEM_PROMPT,
         max_tool_rounds: int = 12,
+        journal: RunJournal | None = None,
     ) -> None:
         if max_tool_rounds < 1:
             raise ValueError("max_tool_rounds must be at least 1")
@@ -85,10 +87,42 @@ class WorkspaceAgent:
         self._tool_map = tool_map
         self._system_prompt = system_prompt
         self._max_tool_rounds = max_tool_rounds
+        self._journal = journal
+        self._log_config = {
+            "model": getattr(model, "model_name", type(model).__name__),
+            "base_url": str(getattr(model, "openai_api_base", "") or ""),
+            "use_responses_api": getattr(model, "use_responses_api", None),
+            "temperature": getattr(model, "temperature", None),
+            "max_retries": getattr(model, "max_retries", None),
+            "system_prompt": system_prompt,
+            "tools": [_model_tool_definition(tool) for tool in tools],
+            "workspace_id": workspace.workspace_id,
+            "max_tool_rounds": max_tool_rounds,
+            "recursion_limit": max_tool_rounds * 2 + 2,
+        }
         self._model_with_tools = model.bind_tools([_model_tool_definition(tool) for tool in tools])
         self._graph = self._build_graph()
 
     async def arun(self, task: str, *, guidelines: str | None = None) -> AgentRunResult:
+        if self._journal is None:
+            return await self._arun(task, guidelines=guidelines)
+        with self._journal.start(self._log_config, task=task, guidelines=guidelines) as log:
+            try:
+                result = await self._arun(task, guidelines=guidelines)
+            except BaseException as exc:
+                messages = exc.messages if isinstance(exc, AgentRunError) else ()
+                log.emit(
+                    "run_finished",
+                    status="failed" if isinstance(exc, Exception) else "interrupted",
+                    error_type=getattr(exc, "error_type", type(exc).__name__),
+                    error=str(exc),
+                    messages=[m.model_dump(mode="json") for m in messages],
+                )
+                raise
+            log.emit("run_finished", status="succeeded", final_answer=result.answer)
+            return result
+
+    async def _arun(self, task: str, *, guidelines: str | None = None) -> AgentRunResult:
         user_content = task if guidelines is None else f"{task}\n\nAnswer guidelines: {guidelines}"
         initial_message = HumanMessage(content=user_content)
         state: dict[str, Any] | None = None
@@ -132,8 +166,25 @@ class WorkspaceAgent:
 
     def _build_graph(self) -> Any:
         async def call_agent(state: MessagesState) -> dict[str, list[AIMessage]]:
-            response = await self._model_with_tools.ainvoke(
-                [SystemMessage(content=self._system_prompt), *state["messages"]]
+            started = time.perf_counter()
+            emit("llm_started", message_count=len(state["messages"]) + 1)
+            try:
+                response = await self._model_with_tools.ainvoke(
+                    [SystemMessage(content=self._system_prompt), *state["messages"]]
+                )
+            except Exception as exc:
+                emit(
+                    "llm_failed",
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                    latency_ms=_elapsed_ms(started),
+                )
+                raise
+            emit(
+                "llm_finished",
+                message=response.model_dump(mode="json"),
+                latency_ms=_elapsed_ms(started),
+                token_usage=_token_usage(cast(AIMessage, response)),
             )
             return {"messages": [cast(AIMessage, response)]}
 
@@ -148,6 +199,7 @@ class WorkspaceAgent:
                 call_id = call.get("id") or f"call-{len(results)}"
                 name = call["name"]
                 arguments = call.get("args", {})
+                emit("tool_started", call_id=call_id, name=name, arguments=arguments)
                 tool = self._tool_map.get(name)
                 if tool is None:
                     results.append(
@@ -158,6 +210,7 @@ class WorkspaceAgent:
                             latency_ms=_elapsed_ms(started_at),
                         )
                     )
+                    emit("tool_finished", message=results[-1].model_dump(mode="json"))
                     continue
                 try:
                     output = await tool.invoke(
@@ -185,6 +238,7 @@ class WorkspaceAgent:
                             latency_ms=_elapsed_ms(started_at),
                         )
                     )
+                emit("tool_finished", message=results[-1].model_dump(mode="json"))
             return {"messages": results}
 
         def route_after_agent(state: MessagesState) -> str:

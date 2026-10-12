@@ -17,6 +17,7 @@ from langchain_core.messages import AIMessage, AnyMessage
 from pydantic import BaseModel, ConfigDict, Field
 
 from data_management_agent.agent import AgentRunError, ToolTrace, WorkspaceAgent
+from data_management_agent.observability import RunContext, run_scope
 
 SCHEMA_VERSION = "dabstep-benchmark-v0"
 CORRECTNESS_METHOD = "normalized_exact_match_v0"
@@ -74,6 +75,7 @@ class BenchmarkTaskResult(BaseModel):
 
     schema_version: Literal["dabstep-benchmark-v0"] = SCHEMA_VERSION
     run_id: str
+    execution_id: str | None = None
     conversation_id: str
     thread_id: str
     turn_id: str
@@ -280,11 +282,20 @@ async def _run_task(
     conversation_id = str(uuid4())
     thread_id = str(uuid4())
     turn_id = str(uuid4())
+    context = RunContext(
+        source="benchmark",
+        run_id=run_id,
+        conversation_id=conversation_id,
+        thread_id=thread_id,
+        turn_id=turn_id,
+        task_id=task.task_id,
+    )
     started_at = datetime.now(UTC)
     started_clock = time.perf_counter()
 
     try:
-        agent_result = await agent.arun(task.question, guidelines=task.guidelines or None)
+        with run_scope(context):
+            agent_result = await agent.arun(task.question, guidelines=task.guidelines or None)
     except Exception as exc:
         completed_at = datetime.now(UTC)
         latency_ms = (time.perf_counter() - started_clock) * 1_000
@@ -303,6 +314,7 @@ async def _run_task(
             failure_types.append("no_tool_calls")
         return BenchmarkTaskResult(
             run_id=run_id,
+            execution_id=context.execution_id,
             conversation_id=conversation_id,
             thread_id=thread_id,
             turn_id=turn_id,
@@ -338,6 +350,7 @@ async def _run_task(
     )
     return BenchmarkTaskResult(
         run_id=run_id,
+        execution_id=context.execution_id,
         conversation_id=conversation_id,
         thread_id=thread_id,
         turn_id=turn_id,
