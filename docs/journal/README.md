@@ -5,7 +5,7 @@
 机器运行过程和精确评测证据保存在 [系统日志](../logging.md)，不混入版本叙述。
 
 文件名使用 `vN-english-summary.md`，例如
-`v1-tool-reliability-and-runtime-boundaries.md`；标题使用 `vN - 版本概述`。
+`v1-dynamic-plan-act-verify.md`；标题使用 `vN - 版本概述`。
 正文开头记录日期。以项目作者的口吻直接描述工作，不写对话回复或任务交接报告。
 
 内容重点：
@@ -22,4 +22,4 @@
 ## 版本记录
 
 - [v0：最小可运行基线与失败诊断](v0-baseline.md)
-- [v1：工具可靠性与运行边界](v1-tool-reliability-and-runtime-boundaries.md)
+- [v0：工具可靠性与运行边界](v0-tool-reliability-and-runtime-boundaries.md)
