@@ -19,7 +19,8 @@ def ensure_supported(entry: WorkspaceEntry) -> str:
     extension = extension_for(entry)
     if extension not in SUPPORTED_EXTENSIONS:
         raise ToolExecutionError(
-            f"unsupported file type for {entry.path}: {extension or 'no extension'}"
+            f"unsupported file type for {entry.path}: {extension or 'no extension'}",
+            code="unsupported_operation",
         )
     return extension
 
@@ -28,7 +29,7 @@ def decode_text(content: bytes, *, path: str) -> str:
     try:
         return content.decode("utf-8-sig")
     except UnicodeDecodeError as exc:
-        raise ToolExecutionError(f"{path} is not valid UTF-8 text") from exc
+        raise ToolExecutionError(f"{path} is not valid UTF-8 text", code="data_error") from exc
 
 
 def table_name_for(entry: WorkspaceEntry) -> str:

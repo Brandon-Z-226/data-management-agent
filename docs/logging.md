@@ -47,6 +47,12 @@ benchmark 结果新增可选 `execution_id`，可与事件文件关联；旧 JSO
 - `run_finished.data`：状态、最终答案或异常类型/信息、总 latency、LLM/tool 调用数、
   tool error 数和总 token usage。失败时还保留可获得的图消息快照。
 
+`bounded-loop-v1` 增加 `tool_blocked`（未调度调用）、`runtime_stopped`（触限原因）、
+`finalization_started`（一次无工具收尾）。`llm_started` 包含 phase 和实际 runtime_instruction。
+版本配置记录轮数/调用次数/重复失败阈值。结束状态区分 succeeded、limited、failed，
+并记录 termination_reason、finalization_used，失败时另有 limit_reason/cause_type。
+`blocked_tool_calls` 独立统计；tool_calls 计允许调度的请求，tool_errors 不含 runtime 阻断。
+
 用每次 LLM 响应的 usage 求和，不按 tool 次数重复累计；`usage_reports` 表示提供 usage
 的响应数，缺失的 usage 不冒充 0。细分 cache/reasoning 等字段保留在原始响应事件中。
 这些数字是模型服务报告的用量，不是独立计费审计。没有记录模型未公开的内部推理。

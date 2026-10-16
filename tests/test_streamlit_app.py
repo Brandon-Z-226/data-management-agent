@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import pytest
 from streamlit.testing.v1 import AppTest
 
 from data_management_agent.benchmark import BenchmarkTaskResult
@@ -38,9 +39,11 @@ def test_streamlit_benchmark_page_handles_missing_results(
     assert "No benchmark result files found" in app.info[0].value
 
 
+@pytest.mark.parametrize("limited", [False, True])
 def test_streamlit_benchmark_page_loads_structured_results(
     tmp_path: Path,
     monkeypatch,
+    limited: bool,
 ) -> None:
     results_dir = tmp_path / "results"
     results_dir.mkdir()
@@ -69,6 +72,15 @@ def test_streamlit_benchmark_page_loads_structured_results(
             "completed_at": "2026-10-08T00:00:00Z",
         }
     )
+    if limited:
+        result = result.model_copy(
+            update={
+                "status": "limited",
+                "termination_reason": "tool_call_budget",
+                "limit_reason": "tool_call_budget",
+                "finalization_used": True,
+            }
+        )
     (results_dir / "run.jsonl").write_text(result.model_dump_json() + "\n")
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
     monkeypatch.setenv("DATA_WORKSPACE_PATH", str(tmp_path))
@@ -80,10 +92,12 @@ def test_streamlit_benchmark_page_loads_structured_results(
     assert not app.exception
     assert [metric.value for metric in app.metric] == [
         "1",
-        "100.0%",
+        "0.0%" if limited else "100.0%",
         "1",
         "1",
         "100.0%",
         "100.0%",
     ]
     assert app.selectbox[1].value == "5"
+    if limited:
+        assert "excluded from normal completion rate" in app.warning[0].value

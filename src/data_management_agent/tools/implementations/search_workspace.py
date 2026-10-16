@@ -55,7 +55,11 @@ class SearchWorkspaceTool(Tool[SearchWorkspaceInput, SearchWorkspaceOutput]):
     ) -> SearchWorkspaceOutput:
         query_tokens = _tokenize(arguments.query)
         if not query_tokens:
-            raise ToolExecutionError("search query must contain at least one searchable token")
+            raise ToolExecutionError(
+                "search query must contain at least one searchable token",
+                code="invalid_arguments",
+                suggested_action="Use words or numbers rather than only punctuation in the search query.",
+            )
 
         extensions, media_types = normalize_extensions(arguments.file_types)
         entries = await _list_all_files(
@@ -164,7 +168,7 @@ def _json_chunks(entry: WorkspaceEntry, text: str) -> list[_Chunk]:
     try:
         value = json.loads(text)
     except json.JSONDecodeError as exc:
-        raise ToolExecutionError(f"invalid JSON in {entry.path}: {exc}") from exc
+        raise ToolExecutionError(f"invalid JSON in {entry.path}: {exc}", code="data_error") from exc
     if not isinstance(value, list):
         return _text_windows(entry, text)
     return [

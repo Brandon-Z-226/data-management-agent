@@ -48,6 +48,11 @@ uv run python scripts/run_agent.py \
   --guidelines "Answer must be just the country code."
 ```
 
+默认最多 12 个工具阶段、24 次允许调度的调用；相同调用失败 2 次后阻止再次原样执行。
+触限时尝试一次无工具收尾，并将结果标为 `limited`，不冒充正常完成。
+可用 `--max-tool-rounds`、`--max-tool-calls`、`--max-repeated-failures` 调整；
+benchmark 支持同名参数。
+
 本地开发调试也可以使用 Streamlit 聊天界面：
 
 ```bash

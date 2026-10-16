@@ -46,7 +46,13 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--workspace", type=Path, default=None)
     parser.add_argument("--output", type=Path, default=None)
     parser.add_argument("--model", default=None)
-    return parser.parse_args(argv)
+    parser.add_argument("--max-tool-rounds", type=int, default=12)
+    parser.add_argument("--max-tool-calls", type=int, default=24)
+    parser.add_argument("--max-repeated-failures", type=int, default=2)
+    args = parser.parse_args(argv)
+    if min(args.max_tool_rounds, args.max_tool_calls, args.max_repeated_failures) < 1:
+        parser.error("runtime limits must be at least 1")
+    return args
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -90,6 +96,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             tools=create_read_only_tools(),
             workspace=LocalWorkspace(workspace_path),
             journal=RunJournal(PROJECT_ROOT),
+            max_tool_rounds=args.max_tool_rounds,
+            max_tool_calls=args.max_tool_calls,
+            max_repeated_failures=args.max_repeated_failures,
         )
         summary = run_benchmark(
             agent=agent,
@@ -110,7 +119,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     completion = "n/a" if summary.completion_rate is None else f"{summary.completion_rate:.1%}"
     print(f"Results: {summary.output_path}")
     print(
-        f"Summary: total={summary.total} succeeded={summary.succeeded} failed={summary.failed} "
+        f"Summary: total={summary.total} succeeded={summary.succeeded} limited={summary.limited} failed={summary.failed} "
         f"correct={summary.correct}/{summary.scored} answered_accuracy={accuracy} "
         f"overall_correct={overall} completion={completion}"
     )
@@ -146,7 +155,9 @@ def _print_task_completed(result: BenchmarkTaskResult) -> None:
     outcome = "unscored" if correctness is None else ("correct" if correctness else "incorrect")
     print(
         f"  {result.status}, {outcome}, {result.latency_ms / 1_000:.2f}s, "
-        f"tools={len(result.tool_calls)}, errors={len(result.tool_errors)}"
+        f"tools={sum(call.attempted for call in result.tool_calls)}, "
+        f"blocked={sum(not call.attempted for call in result.tool_calls)}, "
+        f"errors={len(result.tool_errors)}"
     )
 
 

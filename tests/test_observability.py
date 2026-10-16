@@ -93,7 +93,7 @@ def test_success_journal_and_secret_redaction(tmp_path: Path, monkeypatch: pytes
     assert json.loads(other.read_text().splitlines()[0])["conversation_id"] != "conversation-one"
 
 
-def test_recursion_failure_preserves_validation_error(tmp_path: Path):
+def test_finalization_failure_preserves_validation_error(tmp_path: Path):
     agent = agent_at(
         tmp_path,
         [call("read_file", {"file": {"path": "manual.md", "max_chars": 20}})],
@@ -108,7 +108,8 @@ def test_recursion_failure_preserves_validation_error(tmp_path: Path):
     assert "max_chars" in tool_events[0]["data"]["message"]["content"]
     final = events[-1]["data"]
     assert final["status"] == "failed"
-    assert final["error_type"] == "GraphRecursionError"
+    assert final["error_type"] == "FinalizationError"
+    assert final["limit_reason"] == "tool_round_budget"
     assert final["tool_errors"] >= 1
 
 
@@ -128,6 +129,34 @@ def test_benchmark_execution_links_to_event_log(tmp_path: Path):
     assert start["task_id"] == "5"
     assert start["thread_id"] == result.thread_id
     assert start["source"] == "benchmark"
+
+
+def test_limited_run_logs_blocked_calls_and_finalization_separately(tmp_path: Path):
+    calls = [
+        {"name": "list_workspace", "args": {}, "id": str(i), "type": "tool_call"} for i in range(3)
+    ]
+    agent = agent_at(
+        tmp_path,
+        [AIMessage(content="", tool_calls=calls), AIMessage(content="Partial answer")],
+        max_tool_calls=1,
+    )
+    context = RunContext(source="test")
+    with run_scope(context):
+        result = agent.run("test")
+    assert result.status == "limited"
+    events = events_at(tmp_path, context)
+    final = events[-1]["data"]
+    assert final["status"] == "limited"
+    assert final["termination_reason"] == "tool_call_budget"
+    assert final["finalization_used"]
+    assert final["tool_calls"] == 1
+    assert final["blocked_tool_calls"] == 2
+    assert final["tool_errors"] == 0
+    assert final["llm_calls"] == 2
+    assert len([e for e in events if e["event"] == "finalization_started"]) == 1
+    starts = [e["data"] for e in events if e["event"] == "llm_started"]
+    assert starts[-1]["phase"] == "finalization"
+    assert "No more tools" in starts[-1]["runtime_instruction"]
 
 
 def test_fingerprint_detects_uncommitted_source_changes(tmp_path: Path):
@@ -163,7 +192,8 @@ def test_model_failure_is_logged(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
         "llm_failed",
         "run_finished",
     ]
-    assert events[-1]["data"]["error_type"] == "RuntimeError"
+    assert events[-1]["data"]["error_type"] == "ModelRequestError"
+    assert events[-1]["data"]["cause_type"] == "RuntimeError"
     assert events[-1]["data"]["token_usage"] is None
 
 

@@ -126,5 +126,33 @@ def test_agent_error_preserves_partial_trajectory(tmp_path: Path) -> None:
     with pytest.raises(AgentRunError) as caught:
         agent.run("Keep listing forever")
 
-    assert caught.value.error_type == "GraphRecursionError"
+    assert caught.value.error_type == "FinalizationError"
+    assert caught.value.limit_reason == "tool_round_budget"
     assert [trace.name for trace in caught.value.trajectory] == ["list_workspace"]
+
+
+def test_incomplete_record_budget_becomes_error_tool_message(tmp_path: Path) -> None:
+    (tmp_path / "rows.json").write_text('[{"description": "a long complete record"}]')
+    agent = WorkspaceAgent(
+        model=ToolCallingFakeModel(
+            responses=[
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "read_file",
+                            "args": {"file": {"path": "rows.json"}, "max_chars": 5},
+                            "id": "budget-error",
+                            "type": "tool_call",
+                        }
+                    ],
+                ),
+                AIMessage(content="The read budget was too small."),
+            ]
+        ),
+        tools=create_read_only_tools(),
+        workspace=LocalWorkspace(tmp_path),
+    )
+    result = agent.run("Read a record with a tiny budget")
+    assert result.trajectory[0].status == "error"
+    assert "max_chars" in result.trajectory[0].error

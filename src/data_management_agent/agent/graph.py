@@ -5,17 +5,25 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+import traceback
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from typing import Any, Literal, cast
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, SystemMessage, ToolMessage
-from langgraph.graph import END, START, MessagesState, StateGraph
+from langgraph.graph import END, START, StateGraph
 
 from data_management_agent.observability import RunJournal, emit
 from data_management_agent.tools import Tool, ToolContext
+from data_management_agent.tools.feedback import (
+    ToolErrorFeedback,
+    error_feedback,
+    unknown_tool_feedback,
+)
 from data_management_agent.workspace import Workspace
+
+from .runtime import AgentState, call_history, signature
 
 DEFAULT_SYSTEM_PROMPT = """You are a data workspace agent. Answer the user's task using evidence from
 the workspace; do not guess facts or calculate large datasets mentally.
@@ -39,6 +47,7 @@ class ToolTrace:
     error: str | None = None
     latency_ms: float | None = None
     token_usage: dict[str, Any] | None = None
+    attempted: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,6 +55,9 @@ class AgentRunResult:
     answer: str
     messages: tuple[AnyMessage, ...]
     trajectory: tuple[ToolTrace, ...]
+    status: Literal["succeeded", "limited"] = "succeeded"
+    termination_reason: str = "completed"
+    finalization_used: bool = False
 
 
 class AgentRunError(RuntimeError):
@@ -57,11 +69,19 @@ class AgentRunError(RuntimeError):
         *,
         messages: tuple[AnyMessage, ...],
         error_type: str = "AgentRunError",
+        termination_reason: str = "run_error",
+        limit_reason: str | None = None,
+        cause_type: str | None = None,
+        finalization_used: bool = False,
     ) -> None:
         super().__init__(message)
         self.messages = messages
         self.trajectory = _extract_trajectory(messages)
         self.error_type = error_type
+        self.termination_reason = termination_reason
+        self.limit_reason = limit_reason
+        self.cause_type = cause_type
+        self.finalization_used = finalization_used
 
 
 class WorkspaceAgent:
@@ -75,10 +95,14 @@ class WorkspaceAgent:
         workspace: Workspace,
         system_prompt: str = DEFAULT_SYSTEM_PROMPT,
         max_tool_rounds: int = 12,
+        max_tool_calls: int = 24,
+        max_repeated_failures: int = 2,
         journal: RunJournal | None = None,
     ) -> None:
         if max_tool_rounds < 1:
             raise ValueError("max_tool_rounds must be at least 1")
+        if max_tool_calls < 1 or max_repeated_failures < 1:
+            raise ValueError("max_tool_calls and max_repeated_failures must be at least 1")
         tool_map = {tool.contract.name: tool for tool in tools}
         if len(tool_map) != len(tools):
             raise ValueError("tool names must be unique")
@@ -87,6 +111,9 @@ class WorkspaceAgent:
         self._tool_map = tool_map
         self._system_prompt = system_prompt
         self._max_tool_rounds = max_tool_rounds
+        self._max_tool_calls = max_tool_calls
+        self._max_repeated_failures = max_repeated_failures
+        self._final_model = model  # Unbound model: the finalization request advertises no tools.
         self._journal = journal
         self._log_config = {
             "model": getattr(model, "model_name", type(model).__name__),
@@ -98,7 +125,10 @@ class WorkspaceAgent:
             "tools": [_model_tool_definition(tool) for tool in tools],
             "workspace_id": workspace.workspace_id,
             "max_tool_rounds": max_tool_rounds,
-            "recursion_limit": max_tool_rounds * 2 + 2,
+            "max_tool_calls": max_tool_calls,
+            "max_repeated_failures": max_repeated_failures,
+            "runtime_policy": "bounded-loop-v1",
+            "recursion_limit": max_tool_rounds * 2 + 4,
         }
         self._model_with_tools = model.bind_tools([_model_tool_definition(tool) for tool in tools])
         self._graph = self._build_graph()
@@ -116,10 +146,20 @@ class WorkspaceAgent:
                     status="failed" if isinstance(exc, Exception) else "interrupted",
                     error_type=getattr(exc, "error_type", type(exc).__name__),
                     error=str(exc),
+                    termination_reason=getattr(exc, "termination_reason", "interrupted"),
+                    limit_reason=getattr(exc, "limit_reason", None),
+                    cause_type=getattr(exc, "cause_type", None),
+                    finalization_used=getattr(exc, "finalization_used", False),
                     messages=[m.model_dump(mode="json") for m in messages],
                 )
                 raise
-            log.emit("run_finished", status="succeeded", final_answer=result.answer)
+            log.emit(
+                "run_finished",
+                status=result.status,
+                final_answer=result.answer,
+                termination_reason=result.termination_reason,
+                finalization_used=result.finalization_used,
+            )
             return result
 
     async def _arun(self, task: str, *, guidelines: str | None = None) -> AgentRunResult:
@@ -128,8 +168,17 @@ class WorkspaceAgent:
         state: dict[str, Any] | None = None
         try:
             async for snapshot in self._graph.astream(
-                {"messages": [initial_message]},
-                config={"recursion_limit": self._max_tool_rounds * 2 + 2},
+                {
+                    "messages": [initial_message],
+                    "tool_rounds": 0,
+                    "tool_attempts": 0,
+                    "stop_reason": None,
+                    "error_type": None,
+                    "error_message": None,
+                    "cause_type": None,
+                    "finalization_used": False,
+                },
+                config={"recursion_limit": self._max_tool_rounds * 2 + 4},
                 stream_mode="values",
             ):
                 state = cast(dict[str, Any], snapshot)
@@ -143,34 +192,89 @@ class WorkspaceAgent:
                 str(exc),
                 messages=partial_messages,
                 error_type=type(exc).__name__,
+                termination_reason="recursion_limit"
+                if type(exc).__name__ == "GraphRecursionError"
+                else "run_error",
+                limit_reason=state.get("stop_reason") if state else None,
+                finalization_used=bool(state and state.get("finalization_used")),
             ) from exc
         if state is None:
             raise AgentRunError("agent graph produced no state", messages=(initial_message,))
         messages = tuple(cast(list[AnyMessage], state["messages"]))
+        if state.get("error_type"):
+            raise AgentRunError(
+                state["error_message"],
+                messages=messages,
+                error_type=state["error_type"],
+                termination_reason="finalization_failed"
+                if state.get("stop_reason")
+                else "model_error",
+                limit_reason=state.get("stop_reason"),
+                cause_type=state.get("cause_type"),
+                finalization_used=state["finalization_used"],
+            )
         try:
             answer = _final_answer(messages)
         except RuntimeError as exc:
             raise AgentRunError(
                 str(exc),
                 messages=messages,
-                error_type="GraphRecursionError",
+                error_type="MissingFinalAnswer",
+                termination_reason="missing_final_answer",
             ) from exc
         return AgentRunResult(
             answer=answer,
             messages=messages,
             trajectory=_extract_trajectory(messages),
+            status="limited" if state.get("stop_reason") else "succeeded",
+            termination_reason=state.get("stop_reason") or "completed",
+            finalization_used=state["finalization_used"],
         )
 
     def run(self, task: str, *, guidelines: str | None = None) -> AgentRunResult:
         return asyncio.run(self.arun(task, guidelines=guidelines))
 
     def _build_graph(self) -> Any:
-        async def call_agent(state: MessagesState) -> dict[str, list[AIMessage]]:
+        async def call_agent(state: AgentState) -> dict[str, Any]:
             started = time.perf_counter()
-            emit("llm_started", message_count=len(state["messages"]) + 1)
+            finalizing = bool(state["stop_reason"])
+            failures, successes, _ = call_history(state["messages"])
+            instruction = (
+                f"Remaining tool rounds: {self._max_tool_rounds - state['tool_rounds']}; "
+                f"remaining tool dispatch attempts: {self._max_tool_calls - state['tool_attempts']}. "
+                "Use structured error feedback; internal failures are not necessarily argument errors. "
+                "Correct failed arguments before another attempt; do not repeat identical failures. "
+                "When only one round remains, it is the last opportunity to gather tool evidence."
+            )
+            if any(count for count in failures.values()):
+                instruction += (
+                    " Some calls failed: consult their ToolMessage before choosing the next action."
+                )
+            if any(count >= 2 for count in successes.values()):
+                instruction += " Some successful calls were repeated; reuse existing evidence unless another call has a specific purpose."
+            if finalizing:
+                instruction = (
+                    f"Tool execution has stopped: {state['stop_reason']}. No more tools are available. "
+                    "Give one final response using only evidence already obtained. Follow the requested "
+                    "answer format if the evidence supports an answer; otherwise state that you could not "
+                    "complete the task and identify missing evidence. Do not guess or claim completion."
+                )
+                emit("finalization_started", reason=state["stop_reason"])
+            emit(
+                "llm_started",
+                message_count=len(state["messages"]) + 1,
+                phase="finalization" if finalizing else "agent",
+                runtime_instruction=instruction,
+            )
             try:
-                response = await self._model_with_tools.ainvoke(
-                    [SystemMessage(content=self._system_prompt), *state["messages"]]
+                model = self._final_model if finalizing else self._model_with_tools
+                response = await model.ainvoke(
+                    [
+                        SystemMessage(
+                            content=self._system_prompt + "\n\nRuntime constraints:\n" + instruction
+                        ),
+                        *state["messages"],
+                    ]
                 )
             except Exception as exc:
                 emit(
@@ -179,26 +283,71 @@ class WorkspaceAgent:
                     error=str(exc),
                     latency_ms=_elapsed_ms(started),
                 )
-                raise
+                return {
+                    "error_type": "FinalizationError" if finalizing else "ModelRequestError",
+                    "error_message": str(exc),
+                    "cause_type": type(exc).__name__,
+                    "finalization_used": finalizing,
+                }
             emit(
                 "llm_finished",
                 message=response.model_dump(mode="json"),
                 latency_ms=_elapsed_ms(started),
                 token_usage=_token_usage(cast(AIMessage, response)),
             )
-            return {"messages": [cast(AIMessage, response)]}
+            if finalizing and (
+                response.tool_calls or response.invalid_tool_calls or not response.text.strip()
+            ):
+                return {
+                    "messages": [response],
+                    "error_type": "FinalizationError",
+                    "error_message": "finalization returned tool calls or no non-empty answer",
+                    "cause_type": "InvalidFinalResponse",
+                    "finalization_used": True,
+                }
+            return {"messages": [cast(AIMessage, response)], "finalization_used": finalizing}
 
-        async def execute_tools(state: MessagesState) -> dict[str, list[ToolMessage]]:
+        async def execute_tools(state: AgentState) -> dict[str, Any]:
             message = state["messages"][-1]
             if not isinstance(message, AIMessage):
                 raise TypeError("tool node requires the last message to be an AIMessage")
 
             results: list[ToolMessage] = []
+            attempts = state["tool_attempts"]
+            stop_reason = state["stop_reason"]
             for call in message.tool_calls:
                 started_at = time.perf_counter()
                 call_id = call.get("id") or f"call-{len(results)}"
                 name = call["name"]
                 arguments = call.get("args", {})
+                failures, _, internal = call_history([*state["messages"], *results])
+                key = signature(name, arguments)
+                if not stop_reason:
+                    if attempts >= self._max_tool_calls:
+                        stop_reason = "tool_call_budget"
+                    elif failures[key] >= self._max_repeated_failures or key in internal:
+                        stop_reason = "repeated_tool_failure"
+                if stop_reason:
+                    feedback = ToolErrorFeedback(
+                        code="runtime_limit",
+                        message=f"Tool call was not attempted: {stop_reason}.",
+                        suggested_action="No further tools will execute. Give a final response using existing evidence, or state the missing evidence without guessing.",
+                    )
+                    blocked = _error_message(
+                        call_id, name, feedback.message, feedback=feedback, latency_ms=0
+                    )
+                    blocked.artifact["attempted"] = False
+                    results.append(blocked)
+                    emit(
+                        "tool_blocked",
+                        call_id=call_id,
+                        name=name,
+                        arguments=arguments,
+                        reason=stop_reason,
+                        message=blocked.model_dump(mode="json"),
+                    )
+                    continue
+                attempts += 1
                 emit("tool_started", call_id=call_id, name=name, arguments=arguments)
                 tool = self._tool_map.get(name)
                 if tool is None:
@@ -207,6 +356,7 @@ class WorkspaceAgent:
                             call_id,
                             name,
                             f"unknown tool: {name}",
+                            feedback=unknown_tool_feedback(name, list(self._tool_map)),
                             latency_ms=_elapsed_ms(started_at),
                         )
                     )
@@ -226,7 +376,7 @@ class WorkspaceAgent:
                             tool_call_id=call_id,
                             name=name,
                             status="success",
-                            artifact={"latency_ms": _elapsed_ms(started_at)},
+                            artifact={"latency_ms": _elapsed_ms(started_at), "attempted": True},
                         )
                     )
                 except Exception as exc:
@@ -235,17 +385,39 @@ class WorkspaceAgent:
                             call_id,
                             name,
                             str(exc),
+                            feedback=error_feedback(exc, tool.contract),
+                            diagnostics="".join(traceback.format_exception(exc)),
                             latency_ms=_elapsed_ms(started_at),
                         )
                     )
                 emit("tool_finished", message=results[-1].model_dump(mode="json"))
-            return {"messages": results}
+            rounds = state["tool_rounds"] + 1
+            if not stop_reason:
+                if attempts >= self._max_tool_calls:
+                    stop_reason = "tool_call_budget"
+                elif rounds >= self._max_tool_rounds:
+                    stop_reason = "tool_round_budget"
+            if stop_reason:
+                emit(
+                    "runtime_stopped",
+                    reason=stop_reason,
+                    tool_rounds=rounds,
+                    tool_attempts=attempts,
+                )
+            return {
+                "messages": results,
+                "tool_rounds": rounds,
+                "tool_attempts": attempts,
+                "stop_reason": stop_reason,
+            }
 
-        def route_after_agent(state: MessagesState) -> str:
+        def route_after_agent(state: AgentState) -> str:
+            if state.get("error_type") or state["stop_reason"]:
+                return END
             message = state["messages"][-1]
             return "tools" if isinstance(message, AIMessage) and message.tool_calls else END
 
-        builder = StateGraph(MessagesState)
+        builder = StateGraph(AgentState)
         builder.add_node("agent", call_agent)
         builder.add_node("tools", execute_tools)
         builder.add_edge(START, "agent")
@@ -271,14 +443,22 @@ def _error_message(
     name: str,
     message: str,
     *,
+    feedback: ToolErrorFeedback,
+    diagnostics: str | None = None,
     latency_ms: float | None = None,
 ) -> ToolMessage:
     return ToolMessage(
-        content=json.dumps({"error": message}),
+        content=json.dumps(feedback.payload(), ensure_ascii=False),
         tool_call_id=call_id,
         name=name,
         status="error",
-        artifact={"error": message, "latency_ms": latency_ms},
+        artifact={
+            "error": message,
+            "latency_ms": latency_ms,
+            "error_code": feedback.code,
+            "diagnostics": diagnostics,
+            "attempted": True,
+        },
     )
 
 
@@ -287,12 +467,11 @@ def _elapsed_ms(started_at: float) -> float:
 
 
 def _final_answer(messages: tuple[AnyMessage, ...]) -> str:
-    for message in reversed(messages):
-        if isinstance(message, AIMessage) and not message.tool_calls:
-            if isinstance(message.content, str):
-                return message.content
+    message = messages[-1] if messages else None
+    if isinstance(message, AIMessage) and not message.tool_calls and not message.invalid_tool_calls:
+        if message.text.strip():
             return message.text
-    raise RuntimeError("agent stopped without a final answer")
+    raise RuntimeError("agent stopped without a non-empty final answer")
 
 
 def _extract_trajectory(messages: tuple[AnyMessage, ...]) -> tuple[ToolTrace, ...]:
@@ -321,6 +500,7 @@ def _extract_trajectory(messages: tuple[AnyMessage, ...]) -> tuple[ToolTrace, ..
                     error=_trace_error(message, content, artifact),
                     latency_ms=_trace_latency(artifact),
                     token_usage=token_usage,
+                    attempted=artifact.get("attempted", True),
                 )
             )
     return tuple(traces)

@@ -1,6 +1,13 @@
 """Agent tool interfaces and Tool Surface v0 contracts."""
 
-from .base import Tool, ToolContext, ToolContract, ToolDefinition, ToolExecutionError
+from .base import (
+    Tool,
+    ToolContext,
+    ToolContract,
+    ToolDefinition,
+    ToolExecutionError,
+    ToolOutputError,
+)
 from .contracts import (
     INSPECT_FILE,
     LIST_WORKSPACE,
@@ -26,4 +33,5 @@ __all__ = [
     "ToolContract",
     "ToolDefinition",
     "ToolExecutionError",
+    "ToolOutputError",
 ]

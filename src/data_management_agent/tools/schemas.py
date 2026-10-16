@@ -19,13 +19,18 @@ class ToolOutput(BaseModel):
 
 
 class ListWorkspaceInput(ToolArguments):
-    path: WorkspacePath = Field(default_factory=lambda: WorkspacePath(root="."))
+    path: WorkspacePath = Field(
+        default_factory=lambda: WorkspacePath(root="."),
+        description="Workspace-relative path. Root is '.', never '/'.",
+    )
     recursive: bool = False
     file_types: frozenset[str] = Field(default_factory=frozenset)
     modified_after: datetime | None = None
     modified_before: datetime | None = None
     metadata: dict[str, JsonValue] = Field(default_factory=dict)
-    cursor: str | None = None
+    cursor: str | None = Field(
+        default=None, description="Copy next_cursor from the previous listing."
+    )
     limit: int = Field(default=100, ge=1, le=1_000)
 
     @model_validator(mode="after")
@@ -46,7 +51,10 @@ class ListWorkspaceOutput(ToolOutput):
 
 class SearchWorkspaceInput(ToolArguments):
     query: str = Field(min_length=1)
-    scope: WorkspacePath = Field(default_factory=lambda: WorkspacePath(root="."))
+    scope: WorkspacePath = Field(
+        default_factory=lambda: WorkspacePath(root="."),
+        description="Workspace-relative search scope; '.' searches the root.",
+    )
     file_types: frozenset[str] = Field(default_factory=frozenset)
     metadata: dict[str, JsonValue] = Field(default_factory=dict)
     top_k: int = Field(default=10, ge=1, le=100)
@@ -57,14 +65,32 @@ class ContentLocation(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    evidence_id: str | None = None
-    page: int | None = Field(default=None, ge=1)
-    section: str | None = None
-    sheet: str | None = None
-    row_start: int | None = Field(default=None, ge=0)
-    row_end: int | None = Field(default=None, ge=0)
-    char_start: int | None = Field(default=None, ge=0)
-    char_end: int | None = Field(default=None, ge=0)
+    evidence_id: str | None = Field(
+        default=None, description="ID from search_workspace; use alone."
+    )
+    page: int | None = Field(
+        default=None, ge=1, description="Reserved; unsupported by current tools."
+    )
+    section: str | None = Field(
+        default=None, description="Markdown heading text; do not mix with char ranges."
+    )
+    sheet: str | None = Field(default=None, description="Reserved; unsupported by current tools.")
+    row_start: int | None = Field(
+        default=None,
+        ge=0,
+        description="CSV/JSON array record start, inclusive, 0-based; CSV header excluded.",
+    )
+    row_end: int | None = Field(
+        default=None, ge=0, description="Record end, exclusive. Omit for open-ended paging."
+    )
+    char_start: int | None = Field(
+        default=None, ge=0, description="Markdown character start, inclusive, 0-based; not bytes."
+    )
+    char_end: int | None = Field(
+        default=None,
+        ge=0,
+        description="Markdown character end, exclusive. Omit to request through EOF.",
+    )
 
     @model_validator(mode="after")
     def validate_location(self) -> ContentLocation:
@@ -108,7 +134,7 @@ class SearchWorkspaceOutput(ToolOutput):
 
 
 class InspectFileInput(ToolArguments):
-    file: WorkspaceRef
+    file: WorkspaceRef = Field(description="Reference with exactly one of path or resource_id.")
 
 
 class InspectFileOutput(ToolOutput):
@@ -119,24 +145,59 @@ class InspectFileOutput(ToolOutput):
 
 
 class ReadFileInput(ToolArguments):
-    file: WorkspaceRef
-    locator: ContentLocation | None = None
-    max_chars: int = Field(default=20_000, ge=1, le=200_000)
+    file: WorkspaceRef = Field(
+        description="Only path OR resource_id. Do not put locator/max_chars inside file."
+    )
+    locator: ContentLocation | None = Field(
+        default=None,
+        description="Top-level selection, sibling of file. Copy next_locator to continue; omit for default first page.",
+    )
+    max_chars: int = Field(
+        default=20_000,
+        ge=1,
+        le=200_000,
+        description="Top-level content character budget, including CSV header/JSON framing; too-small records error instead of being split.",
+    )
 
 
 class ReadFileOutput(ToolOutput):
     entry: WorkspaceEntry
     content: str
     media_type: str = "text/plain"
-    location: ContentLocation | None = None
-    truncated: bool = False
+    location: ContentLocation | None = Field(
+        default=None, description="Actual returned range; zero-based, end-exclusive."
+    )
+    truncated: bool = Field(
+        default=False, description="True when some of the requested scope remains unread."
+    )
+    requested_location: ContentLocation | None = Field(
+        default=None,
+        description="Resolved requested scope, clipped to EOF; not the page size. "
+        "Null for a whole non-array JSON value.",
+    )
+    next_locator: ContentLocation | None = Field(
+        default=None,
+        description="Pass as read_file.locator with the same file to continue within the "
+        "requested scope. Null when that scope is complete.",
+    )
 
 
 class QueryDataInput(ToolArguments):
-    sources: tuple[WorkspaceRef, ...] = Field(min_length=1)
-    query: str = Field(min_length=1)
+    sources: tuple[WorkspaceRef, ...] = Field(
+        min_length=1,
+        description="All CSV/JSON array sources referenced by the query, each with path OR resource_id.",
+    )
+    query: str = Field(
+        min_length=1,
+        description="Single DuckDB SELECT/WITH. Use inspect_file's table_name and columns, not file paths.",
+    )
     dialect: Literal["duckdb"] = "duckdb"
-    max_rows: int = Field(default=1_000, ge=1, le=100_000)
+    max_rows: int = Field(
+        default=1_000,
+        ge=1,
+        le=100_000,
+        description="Returned row limit only; aggregates still use the full source data.",
+    )
 
 
 class QueryDataOutput(ToolOutput):

@@ -30,7 +30,7 @@ class WorkspacePath(RootModel[str]):
     @classmethod
     def validate_path(cls, value: object) -> str:
         if not isinstance(value, str):
-            raise TypeError("workspace path must be a string")
+            raise ValueError("workspace path must be a string")
         if "\x00" in value:
             raise ValueError("workspace path cannot contain a null byte")
         if "\\" in value:
@@ -52,8 +52,15 @@ class WorkspaceRef(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    resource_id: str | None = Field(default=None, min_length=1)
-    path: WorkspacePath | None = None
+    resource_id: str | None = Field(
+        default=None,
+        min_length=1,
+        description="Resource ID from a workspace tool; omit path when set.",
+    )
+    path: WorkspacePath | None = Field(
+        default=None,
+        description="Workspace-relative path, not an absolute path. Use '.' for root. Omit resource_id when set.",
+    )
 
     @model_validator(mode="after")
     def require_exactly_one_locator(self) -> WorkspaceRef:

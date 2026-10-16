@@ -138,6 +138,57 @@ def test_run_benchmark_persists_task_failure(tmp_path: Path) -> None:
     assert result.failure_types == ("run_error", "missing_final_answer", "no_tool_calls")
 
 
+def test_limited_result_is_scored_but_not_normal_completion(tmp_path: Path):
+    agent_result = AgentRunResult(
+        answer="NL",
+        messages=(HumanMessage(content="Question?"), AIMessage(content="NL")),
+        trajectory=(
+            ToolTrace(
+                call_id="blocked",
+                name="list_workspace",
+                arguments={},
+                status="error",
+                result='{"code":"runtime_limit"}',
+                error="blocked",
+                attempted=False,
+            ),
+        ),
+        status="limited",
+        termination_reason="tool_call_budget",
+        finalization_used=True,
+    )
+    path = tmp_path / "limited.jsonl"
+    summary = run_benchmark(
+        agent=cast(WorkspaceAgent, StubAgent(agent_result)),
+        tasks=(DABstepTask(task_id="test-limited", question="Country?", answer="NL"),),
+        output_path=path,
+        model_name="scripted-model",
+    )
+    result = load_results(path)[0]
+    assert summary.limited == 1
+    assert summary.succeeded == summary.failed == 0
+    assert summary.completion_rate == 0
+    assert summary.accuracy == 1
+    assert result.status == "limited"
+    assert result.termination_reason == "tool_call_budget"
+    assert result.finalization_used
+    assert not result.tool_calls[0].attempted
+    assert not result.tool_errors
+    assert "tool_error" not in result.failure_types
+    assert "limited_completion" in result.failure_types
+
+
+def test_error_text_does_not_falsely_imply_graph_recursion(tmp_path: Path):
+    path = tmp_path / "failed.jsonl"
+    run_benchmark(
+        agent=cast(WorkspaceAgent, StubAgent(RuntimeError("unrelated recursion limit in input"))),
+        tasks=(DABstepTask(task_id="test-error", question="Q?", answer="A"),),
+        output_path=path,
+        model_name="scripted-model",
+    )
+    assert "recursion_limit" not in load_results(path)[0].failure_types
+
+
 def test_run_benchmark_uses_one_event_loop_for_all_tasks(tmp_path: Path) -> None:
     result = AgentRunResult(
         answer="NL",

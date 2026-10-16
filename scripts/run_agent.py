@@ -37,7 +37,13 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=None,
         help="model name (default: OPENAI_MODEL or deepseek-flash)",
     )
-    return parser.parse_args(argv)
+    parser.add_argument("--max-tool-rounds", type=int, default=12)
+    parser.add_argument("--max-tool-calls", type=int, default=24)
+    parser.add_argument("--max-repeated-failures", type=int, default=2)
+    args = parser.parse_args(argv)
+    if min(args.max_tool_rounds, args.max_tool_calls, args.max_repeated_failures) < 1:
+        parser.error("runtime limits must be at least 1")
+    return args
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -69,16 +75,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         tools=create_read_only_tools(),
         workspace=workspace,
         journal=RunJournal(PROJECT_ROOT),
+        max_tool_rounds=args.max_tool_rounds,
+        max_tool_calls=args.max_tool_calls,
+        max_repeated_failures=args.max_repeated_failures,
     )
     context = RunContext(source="cli")
     print(f"Event log: {PROJECT_ROOT / 'logs' / 'runs' / (context.execution_id + '.jsonl')}")
     with run_scope(context):
         result = agent.run(args.task, guidelines=args.guidelines)
 
+    print(f"Status: {result.status}; termination: {result.termination_reason}")
     print("Trajectory:")
     for index, step in enumerate(result.trajectory, start=1):
         latency = "n/a" if step.latency_ms is None else f"{step.latency_ms:.3f} ms"
         print(f"{index}. {step.name}({step.arguments}) -> {step.status} [{latency}]")
+        if not step.attempted:
+            print("   Not attempted: blocked by runtime limit.")
         if step.error:
             print(f"   error: {step.error}")
         if step.token_usage:

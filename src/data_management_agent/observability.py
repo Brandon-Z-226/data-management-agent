@@ -152,6 +152,7 @@ class RunLog:
         self.llm_calls = 0
         self.tool_calls = 0
         self.tool_errors = 0
+        self.blocked_tool_calls = 0
         self.usage: dict[str, int] = {}
         self.usage_reports = 0
         snapshot = {**capture_version(journal.project_root), "config": config}
@@ -190,6 +191,8 @@ class RunLog:
                     self.usage[key] = self.usage.get(key, 0) + usage[key]
         if event == "tool_started":
             self.tool_calls += 1
+        if event == "tool_blocked":
+            self.blocked_tool_calls += 1
         if event == "tool_finished" and data["message"].get("status") == "error":
             self.tool_errors += 1
         if event == "run_finished":
@@ -198,6 +201,7 @@ class RunLog:
                 llm_calls=self.llm_calls,
                 tool_calls=self.tool_calls,
                 tool_errors=self.tool_errors,
+                blocked_tool_calls=self.blocked_tool_calls,
                 token_usage=self.usage or None,
                 usage_reports=self.usage_reports,
             )

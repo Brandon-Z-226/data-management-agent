@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from typing import Any
@@ -9,7 +10,12 @@ from langchain_core.language_models.fake_chat_models import FakeMessagesListChat
 from langchain_core.messages import AIMessage
 
 from data_management_agent.agent import AgentRunResult, WorkspaceAgent
-from data_management_agent.tools.implementations import create_read_only_tools
+from data_management_agent.tools import ToolContext
+from data_management_agent.tools.implementations import (
+    QueryDataTool,
+    ReadFileTool,
+    create_read_only_tools,
+)
 from data_management_agent.workspace import LocalWorkspace
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -86,6 +92,48 @@ def test_dev_task_1305_document_and_data_pipeline() -> None:
         "query_data",
     ]
     assert '"average_fee":0.123217' in result.trajectory[-1].result
+
+
+def test_real_fees_repeated_scans_are_stable() -> None:
+    query = """
+        SELECT 1 AS part, COUNT(*) AS n, AVG(fixed_amount + rate * 10.0 / 10000.0) AS fee
+        FROM fees WHERE card_scheme = 'GlobalCard' AND is_credit = true
+        UNION ALL
+        SELECT 2, COUNT(*), AVG(fixed_amount + rate * 10.0 / 10000.0)
+        FROM fees WHERE card_scheme = 'GlobalCard' AND (is_credit = true OR is_credit IS NULL)
+        UNION ALL
+        SELECT 3, COUNT(*), AVG(fixed_amount + rate * 10.0 / 10000.0)
+        FROM fees WHERE card_scheme = 'GlobalCard' ORDER BY part
+    """
+
+    async def check():
+        tool = QueryDataTool()
+        context = ToolContext(workspace=LocalWorkspace(DABSTEP_ROOT))
+        for _ in range(20):
+            result = await tool.invoke(
+                {"sources": [{"path": "fees.json"}], "query": query}, context=context
+            )
+            assert [row["n"] for row in result.rows] == [123, 144, 257]
+            assert result.rows[1]["fee"] == pytest.approx(0.12013194444444449)
+
+    asyncio.run(check())
+
+
+def test_real_manual_can_be_read_completely_by_following_locator() -> None:
+    async def check():
+        tool = ReadFileTool()
+        context = ToolContext(workspace=LocalWorkspace(DABSTEP_ROOT))
+        first = await tool.invoke({"file": {"path": "manual.md"}}, context=context)
+        assert first.truncated and len(first.content) == 20000
+        second = await tool.invoke(
+            {"file": {"path": "manual.md"}, "locator": first.next_locator}, context=context
+        )
+        assert not second.truncated and second.next_locator is None
+        # Compare decoded characters, not bytes or newline-normalized text.
+        expected = (DABSTEP_ROOT / "manual.md").read_bytes().decode("utf-8-sig")
+        assert first.content + second.content == expected
+
+    asyncio.run(check())
 
 
 def run_dev_task_1305_smoke() -> AgentRunResult:

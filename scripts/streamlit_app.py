@@ -74,7 +74,8 @@ def _render_trajectory(trajectory: list[dict[str, Any]]) -> None:
     for index, trace in enumerate(trajectory, start=1):
         latency = trace.get("latency_ms")
         latency_label = "latency unavailable" if latency is None else f"{latency:.3f} ms"
-        label = f"{index}. {trace['name']} · {trace['status']} · {latency_label}"
+        status = trace["status"] if trace.get("attempted", True) else "blocked (not attempted)"
+        label = f"{index}. {trace['name']} · {status} · {latency_label}"
         with st.expander(label):
             st.caption(f"Call ID: {trace['call_id']}")
             st.markdown("**Arguments**")
@@ -137,6 +138,8 @@ def _render_chat_page() -> None:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
             if message["role"] == "assistant":
+                if message.get("status") == "limited":
+                    st.warning(f"Limited result: {message['termination_reason']}")
                 st.caption(f"Agent latency: {message['latency_ms']:.3f} ms")
                 _render_trajectory(message["trajectory"])
 
@@ -161,6 +164,10 @@ def _render_chat_page() -> None:
             latency_ms = (time.perf_counter() - started_at) * 1_000
             trajectory = [_stored_trace(trace) for trace in result.trajectory]
             st.markdown(result.answer)
+            if result.status == "limited":
+                st.warning(
+                    f"Limited result: {result.termination_reason}. This is a runtime-limited final response, not normal completion."
+                )
             st.caption(f"Agent latency: {latency_ms:.3f} ms")
             _render_trajectory(trajectory)
             st.session_state.messages.append(
@@ -169,6 +176,8 @@ def _render_chat_page() -> None:
                     "content": result.answer,
                     "latency_ms": latency_ms,
                     "trajectory": trajectory,
+                    "status": result.status,
+                    "termination_reason": result.termination_reason,
                 }
             )
         except Exception as exc:
@@ -216,6 +225,11 @@ def _render_benchmark_page(results_dir: Path | None = None) -> None:
     metric_columns[5].metric("Overall correct", f"{overall_correct:.1%}")
     if failed:
         st.warning(f"{failed} task run(s) failed before producing a final answer.")
+    limited = sum(result.status == "limited" for result in results)
+    if limited:
+        st.warning(
+            f"{limited} task run(s) produced limited final responses; excluded from normal completion rate."
+        )
 
     failure_counts = Counter(
         failure_type for result in results for failure_type in result.failure_types
@@ -235,11 +249,13 @@ def _result_row(result: BenchmarkTaskResult) -> dict[str, Any]:
         "level": result.level,
         "status": result.status,
         "error_type": result.error_type,
+        "termination_reason": result.termination_reason,
         "correct": result.correctness.is_correct,
         "final_answer": result.final_answer,
         "reference_answer": result.reference_answer,
         "latency_s": round(result.latency_ms / 1_000, 3),
-        "tool_calls": len(result.tool_calls),
+        "tool_calls": sum(call.attempted for call in result.tool_calls),
+        "blocked_calls": sum(not call.attempted for call in result.tool_calls),
         "tool_errors": len(result.tool_errors),
         "failure_types": ", ".join(result.failure_types),
     }
@@ -255,6 +271,10 @@ def _render_benchmark_task(result: BenchmarkTaskResult) -> None:
     )
     if result.error:
         st.error(f"{result.error_type or 'Error'}: {result.error}")
+    st.caption(
+        f"status={result.status} · termination={result.termination_reason or 'not recorded'} · "
+        f"limit={result.limit_reason or 'none'} · cause={result.cause_type or 'none'}"
+    )
     st.markdown("**Tool calls**")
     _render_trajectory([call.model_dump(mode="json") for call in result.tool_calls])
     with st.expander("Complete message trajectory"):

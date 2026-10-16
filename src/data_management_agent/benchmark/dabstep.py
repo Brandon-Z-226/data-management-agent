@@ -57,6 +57,7 @@ class ToolCallResult(BaseModel):
     error: str | None = None
     latency_ms: float | None = None
     token_usage: dict[str, Any] | None = None
+    attempted: bool = True
 
 
 class ToolErrorResult(BaseModel):
@@ -90,7 +91,11 @@ class BenchmarkTaskResult(BaseModel):
     guidelines: str
     reference_answer: str
     final_answer: str | None = None
-    status: Literal["succeeded", "failed"]
+    status: Literal["succeeded", "limited", "failed"]
+    termination_reason: str | None = None
+    limit_reason: str | None = None
+    cause_type: str | None = None
+    finalization_used: bool = False
     error_type: str | None = None
     error: str | None = None
     correctness: CorrectnessResult
@@ -112,6 +117,7 @@ class BenchmarkRunSummary(BaseModel):
     total: int = Field(ge=0)
     succeeded: int = Field(ge=0)
     failed: int = Field(ge=0)
+    limited: int = Field(default=0, ge=0)
     scored: int = Field(ge=0)
     correct: int = Field(ge=0)
     accuracy: float | None = None
@@ -306,8 +312,14 @@ async def _run_task(
         tool_errors = _tool_errors(tool_calls)
         failure_types = ["run_error", "missing_final_answer"]
         error_type = exc.error_type if isinstance(exc, AgentRunError) else type(exc).__name__
-        if error_type == "GraphRecursionError" or "Recursion limit" in str(exc):
+        if error_type == "GraphRecursionError":
             failure_types.append("recursion_limit")
+        termination_reason = getattr(exc, "termination_reason", "run_error")
+        if termination_reason not in failure_types:
+            failure_types.append(termination_reason)
+        limit_reason = getattr(exc, "limit_reason", None)
+        if limit_reason and limit_reason not in failure_types:
+            failure_types.append(limit_reason)
         if tool_errors:
             failure_types.append("tool_error")
         if not tool_calls:
@@ -325,6 +337,10 @@ async def _run_task(
             guidelines=task.guidelines,
             reference_answer=task.answer,
             status="failed",
+            termination_reason=termination_reason,
+            limit_reason=getattr(exc, "limit_reason", None),
+            cause_type=getattr(exc, "cause_type", None),
+            finalization_used=getattr(exc, "finalization_used", False),
             error_type=error_type,
             error=str(exc),
             correctness=correctness,
@@ -348,6 +364,8 @@ async def _run_task(
         tool_calls=tool_calls,
         tool_errors=tool_errors,
     )
+    if agent_result.status == "limited":
+        failure_types += (agent_result.termination_reason, "limited_completion")
     return BenchmarkTaskResult(
         run_id=run_id,
         execution_id=context.execution_id,
@@ -361,7 +379,10 @@ async def _run_task(
         guidelines=task.guidelines,
         reference_answer=task.answer,
         final_answer=agent_result.answer,
-        status="succeeded",
+        status=agent_result.status,
+        termination_reason=agent_result.termination_reason,
+        limit_reason=agent_result.termination_reason if agent_result.status == "limited" else None,
+        finalization_used=agent_result.finalization_used,
         correctness=correctness,
         trajectory=_message_trajectory(agent_result.messages),
         tool_calls=tool_calls,
@@ -386,6 +407,7 @@ def _tool_calls(traces: Sequence[ToolTrace]) -> tuple[ToolCallResult, ...]:
             error=trace.error,
             latency_ms=trace.latency_ms,
             token_usage=trace.token_usage,
+            attempted=trace.attempted,
         )
         for index, trace in enumerate(traces)
     )
@@ -400,7 +422,7 @@ def _tool_errors(tool_calls: Sequence[ToolCallResult]) -> tuple[ToolErrorResult,
             error=call.error or call.result,
         )
         for call in tool_calls
-        if call.status == "error"
+        if call.status == "error" and call.attempted
     )
 
 
@@ -480,6 +502,7 @@ def _summarize(
         total=len(results),
         succeeded=sum(result.status == "succeeded" for result in results),
         failed=sum(result.status == "failed" for result in results),
+        limited=sum(result.status == "limited" for result in results),
         scored=len(scored),
         correct=correct,
         accuracy=correct / len(scored) if scored else None,
